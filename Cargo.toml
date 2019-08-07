@@ -1,0 +1,11 @@
+[package]
+name = "a-chat"
+version = "0.1.0"
+authors = ["Aleksey Kladov <aleksey.kladov@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures-preview = { version = "0.3.0-alpha.17", features = [ "async-await", "nightly" ] }
+async-std = { path = "../async-std" }

@@ -1,0 +1,226 @@
+= a-chat tutorial
+:icons: font
+:source-highlighter: pygments
+:pygments-style: borland
+
+:source-language: rust
+
+In this tutorial, we will implement an asynchronous chat on top of async-std.
+
+== Specification
+
+The chat uses a simple text protocol over TCP.
+Protocol consists of utf-8 messages, separated by `\n`.
+
+The client connects to the server and sends login as a first line.
+After that, the client can send messages to other clients using the following syntax:
+
+[source]
+----
+login1, login2, ... login2: message
+----
+
+Each of the specified clients than receives a `from login: message` message.
+
+A possible session might look like this
+
+[cols="2",frame=none,grid=none]
+|===
+a|
+.alice
+----
+> alice
+> bob: hello
+
+
+< from bob: hi!
+----
+
+a|
+.bob
+----
+> bob
+
+< from alice: hello
+> alice, bob: hi!
+< from bob: hi!
+----
+
+|===
+
+The main challenge for the chat server is keeping track of many concurrent connections.
+The main challenge for the chat client is managing concurrent outgoing messages, incoming messages and user's typing.
+
+== Getting Started
+
+Let's create a new Cargo project:
+
+[source]
+----
+$ cargo new a-chat
+$ cd a-chat
+----
+
+At the moment `async-std` requires nightly, so let's add a rustup override for convenience:
+
+[source]
+----
+$ rustup override add nightly
+$ rustc --version
+rustc 1.38.0-nightly (c4715198b 2019-08-05)
+----
+
+== Accept Loop
+
+Let's implement the scaffold of the server: a loop that binds a TCP socket to an address and starts accepting connections.
+
+
+First of all, let's add required import boilerplate:
+
+[source,rust]
+----
+#![feature(async_await)]
+
+use std::net::ToSocketAddrs; <1>
+
+use async_std::{
+    prelude::*, <2>
+    task,       <3>
+    net::TcpListener, <4>
+};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>; <5>
+----
+
+<1> `async_std` uses `std` types where appropriate.
+    We'll need `ToSocketAddrs` to specify address to listen on.
+<2> `prelude` re-exports some traits required to work with futures and streams
+<3> The `task` module roughtly corresponds to `std::thread` module, but tasks are much lighter weight.
+    A single thread can run many tasks.
+<4> For the socket type, we use `TcpListener` from `async_std`, which is just like `std::net::TcpListener`, but is non-blocking and uses `async` API.
+<5> We will skip implementing comprehensive error handling in this example.
+    To propagate the errors, we will use a boxed error trait object.
++
+NOTE: Do you know that there's `From<&'_ str> for Box<dyn Error>` implementation in
+      stdlib, which allows you to use strings with `?` operator?
+
+
+Now we can write the server's accept loop:
+
+[source,rust]
+----
+async fn server(addr: impl ToSocketAddrs) -> Result<()> { <1>
+    let listener = TcpListener::bind(addr).await?; <2>
+    let mut incoming = listener.incoming();
+    while let Some(stream) = incoming.next().await { <3>
+        // TODO
+    }
+    Ok(())
+}
+----
+
+<1> We mark `server` function as `async`, which allows us to use `.await` syntax inside.
+<2> `TcpListener::bind` call returns a future, which we `.await` to extract the `Result`, and then `?` to get a `TcpListener`.
+    Note how `.await` and `?` work nicely together.
+    This is exactly how `std::net::TcpListener` works, but with `.await` added.
+    Mirroring API of `std` is an explicit design goal of `async_std`.
+<3> Here, we would like to iterate incoming sockets, just how one would do in `std`:
++
+[source,rust]
+----
+let listener: std::net::TcpListener = unimplemented!();
+for stream in listener.incoming() {
+
+}
+----
++
+Unfortunately this doesn't quite work with `async` yet, because there's no support for `async` for-loops in the language yet.
+For this reason we have to implement the loop manually, by using `while let Some(item) = iter.next().await` pattern.
+
+Finally, let's add main:
+
+[source,rust]
+----
+fn main() -> Result<()> {
+    let fut = server("127.0.0.1:8080");
+    task::block_on(fut)
+}
+----
+
+The crucial thing to realise that is in Rust, unlike other languages, calling an async function does **not** run any code.
+Async functions only construct futures, which are inert state machines.
+To start stepping through the future state-machine in an async function, you should use `.await`.
+In a non-async function, a way to execute a future is to handle it to the executor.
+In this case, we use `task::block_on` to execute future on the current thread and block until it's done.
+
+== Receiving messages
+
+Let's implement the receiving part of the protocol.
+We need to:
+
+. split incoming `TcpStream` on `\n` and decode bytes as utf-8
+. interpret the first line as a login
+. parse the rest of the lines as a  `login: message`
+
+
+[source]
+----
+use async_std::net::TcpStream;
+
+async fn server(addr: impl ToSocketAddrs) -> Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    let mut incoming = listener.incoming();
+    while let Some(stream) = incoming.next().await {
+        let stream = stream?;
+        println!("Accepting from: {}", stream.peer_addr()?);
+        let _handle = task::spawn(client(stream)); <1>
+    }
+    Ok(())
+}
+
+async fn client(stream: TcpStream) -> Result<()> {
+    let reader = BufReader::new(&stream); <2>
+    let mut lines = reader.lines();
+
+    let name = match lines.next().await { <3>
+        None => Err("peer disconnected immediately")?,
+        Some(line) => line?,
+    };
+    println!("name = {}", name);
+
+    while let Some(line) = lines.next().await { <4>
+        let line = line?;
+        let (dest, msg) = match line.find(':') { <5>
+            None => continue,
+            Some(idx) => (&line[..idx], line[idx + 1 ..].trim()),
+        };
+        let dest: Vec<String> = dest.split(',').map(|name| name.trim().to_string()).collect();
+        let msg: String = msg.trim().to_string();
+    }
+    Ok(())
+}
+----
+
+<1> We use `task::spawn` function to spawn an independent task for working with each client.
+    That is, after accepting the client the `server` loop immediately starts waiting for the next one.
+    This is the core benefit of event-driven architecture: we serve many number of clients concurrently, without spending many hardware threads.
+
+<2> Luckily, the "split byte stream into lines" functionality is already implemented.
+    `.lines()` call returns a stream of ``String``'s.
+    TODO: show how one would implement `lines` by hand?
+
+<3> We get the first line -- login
+
+<4> And, once again, we implement a manual async for loop.
+
+<5> Finally, we parse each line into a list of destination logins and the message itself.
+
+== Sending Messages
+
+Now it's time to implement the other half -- sending messages.
+A most obvious way to implement sending is to give each `client` access to the write half of `TcpStream` of each other clients.
+That way, a client can directly `.write_all` a message to recipients.
+However, this would be wrong: if Alice sends `bob: foo`, and Charley sends `bob: bar`, Bob might actually receive `fobaor`.
+Sending a message over a socket might require several syscalls, so two concurrent ``.write_all``'s might interfere with each other!
+
+

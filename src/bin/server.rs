@@ -3,8 +3,8 @@
 use std::{collections::HashMap, net::ToSocketAddrs};
 
 use futures::{
-    io::{BufReader, WriteHalf},
-    stream::FuturesUnordered,
+    io::{BufReader, WriteHalf, AsyncRead},
+    stream::{FuturesUnordered, Stream},
     channel::mpsc::{self, unbounded},
     SinkExt,
     select,

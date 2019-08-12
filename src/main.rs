@@ -26,11 +26,16 @@ async fn server(addr: impl ToSocketAddrs) -> Result<()> {
 
     let (broker_sender, broker_receiver) = mpsc::unbounded();
     let broker = task::spawn(broker(broker_receiver));
+    let mut readers = Vec::new();
     let mut incoming = listener.incoming();
     while let Some(stream) = incoming.next().await {
         let stream = stream?;
         println!("Accepting from: {}", stream.peer_addr()?);
-        let _handle = task::spawn(client(broker_sender.clone(), stream));
+        let handle = task::spawn(client(broker_sender.clone(), stream));
+        readers.push(handle);
+    }
+    for reader in readers {
+        reader.await?;
     }
     broker.await?;
     Ok(())
@@ -91,6 +96,7 @@ enum Event {
 
 async fn broker(mut events: Receiver<Event>) -> Result<()> {
     let mut peers: HashMap<String, Sender<String>> = HashMap::new();
+    let mut writers = Vec::new();
 
     while let Some(event) = events.next().await {
         match event {
@@ -104,9 +110,14 @@ async fn broker(mut events: Receiver<Event>) -> Result<()> {
             Event::NewPeer { name, stream} => {
                 let (client_sender, client_receiver) = mpsc::unbounded();
                 peers.insert(name.clone(), client_sender);
-                let _handle = task::spawn(client_writer(client_receiver, stream));
+                let handle = task::spawn(client_writer(client_receiver, stream));
+                writers.push(handle);
             }
         }
+    }
+    drop(peers);
+    for writer in writers {
+        writer.await?;
     }
     Ok(())
 }

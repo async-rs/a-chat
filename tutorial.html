@@ -1218,6 +1218,348 @@ This drops writer&#8217;s senders.</td>
 </div>
 </div>
 </div>
+<div class="sect1">
+<h2 id="_handling_disconnections">Handling Disconnections</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>Currently, we only ever <em>add</em> new peers to the map.
+This is clearly wrong: if a peer closes connection to the chat, we should not try to send any more messages to it.</p>
+</div>
+<div class="paragraph">
+<p>One subtlety with handing disconnection is that we can detect it either in the reader&#8217;s task, or in the writer&#8217;s task.
+The most obvious solution here is to just remove the peer from the <code>peers</code> map in both cases, but this would be wrong.
+If <em>both</em> read and write fail, we&#8217;ll remove the peer twice, but it can be the case that the peer reconnected between the two failures!
+To fix this, we will only remove the peer when the write side finishes.
+If the read side finishes we will notify the write side that it should stop as well.
+That is, we need to add an ability to signal shutdown for the writer task.</p>
+</div>
+<div class="paragraph">
+<p>One way to approach this is a <code>shutdown: Receiver&lt;()&gt;</code> channel.
+There&#8217;s a more minimal solution however, which makes a clever use of RAII.
+Closing a channel is a synchronization event, so we don&#8217;t need to send a shutdown message, we can just drop the sender.
+This way, we statically guarantee that we issue shutdown exactly once, even if we early return via <code>?</code> or panic.</p>
+</div>
+<div class="paragraph">
+<p>First, let&#8217;s add shutdown channel to the <code>client</code>:</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="pygments highlight"><code data-lang="rust"><span></span><span class="tok-cp">#[derive(Debug)]</span><span class="tok-w"></span>
+<span class="tok-k">enum</span> <span class="tok-nc">Void</span><span class="tok-w"> </span><span class="tok-p">{}</span><span class="tok-w"> </span><i class="conum" data-value="1"></i><b>(1)</b>
+
+<span class="tok-cp">#[derive(Debug)]</span><span class="tok-w"></span>
+<span class="tok-k">enum</span> <span class="tok-nc">Event</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">NewPeer</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">name</span>: <span class="tok-nb">String</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">stream</span>: <span class="tok-nc">Arc</span><span class="tok-o">&lt;</span><span class="tok-n">TcpStream</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">shutdown</span>: <span class="tok-nc">Receiver</span><span class="tok-o">&lt;</span><span class="tok-n">Void</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"> </span><i class="conum" data-value="2"></i><b>(2)</b>
+<span class="tok-w">    </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">Message</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">from</span>: <span class="tok-nb">String</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">to</span>: <span class="tok-nb">Vec</span><span class="tok-o">&lt;</span><span class="tok-nb">String</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">msg</span>: <span class="tok-nb">String</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span>
+
+<span class="tok-n">async</span><span class="tok-w"> </span><span class="tok-k">fn</span> <span class="tok-nf">client</span><span class="tok-p">(</span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">broker</span>: <span class="tok-nc">Sender</span><span class="tok-o">&lt;</span><span class="tok-n">Event</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">stream</span>: <span class="tok-nc">TcpStream</span><span class="tok-p">)</span><span class="tok-w"> </span>-&gt; <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-c1">// ...</span>
+
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-n">_shutdown_sender</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">shutdown_receiver</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">mpsc</span>::<span class="tok-n">unbounded</span>::<span class="tok-o">&lt;</span><span class="tok-n">Void</span><span class="tok-o">&gt;</span><span class="tok-p">();</span><span class="tok-w"> </span><i class="conum" data-value="3"></i><b>(3)</b>
+<span class="tok-w">    </span><span class="tok-n">broker</span><span class="tok-p">.</span><span class="tok-n">send</span><span class="tok-p">(</span><span class="tok-n">Event</span>::<span class="tok-n">NewPeer</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">name</span>: <span class="tok-nc">name</span><span class="tok-p">.</span><span class="tok-n">clone</span><span class="tok-p">(),</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">stream</span>: <span class="tok-nc">Arc</span>::<span class="tok-n">clone</span><span class="tok-p">(</span><span class="tok-o">&amp;</span><span class="tok-n">stream</span><span class="tok-p">),</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">shutdown</span>: <span class="tok-nc">shutdown_receiver</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">}).</span><span class="tok-n">await</span><span class="tok-p">.</span><span class="tok-n">unwrap</span><span class="tok-p">();</span><span class="tok-w"></span>
+
+<span class="tok-w">    </span><span class="tok-c1">// ...</span>
+<span class="tok-p">}</span><span class="tok-w"></span></code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<table>
+<tr>
+<td><i class="conum" data-value="1"></i><b>1</b></td>
+<td>To enforce that no messages are send along the shutdown channel, we use an uninhabited type.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="2"></i><b>2</b></td>
+<td>We pass the shutdown channel to the writer task</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="3"></i><b>3</b></td>
+<td>In the reader, we create an <code>_shutdown_sender</code> whose only purpose is to get dropped.</td>
+</tr>
+</table>
+</div>
+<div class="paragraph">
+<p>In the <code>client_writer</code>, we now need to chose between shutdown and message channels.
+We use <code>select</code> macro for this purpose:</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="pygments highlight"><code data-lang="rust"><span></span><span class="tok-k">use</span><span class="tok-w"> </span><span class="tok-n">futures</span>::<span class="tok-n">select</span><span class="tok-p">;</span><span class="tok-w"></span>
+
+<span class="tok-n">async</span><span class="tok-w"> </span><span class="tok-k">fn</span> <span class="tok-nf">client_writer</span><span class="tok-p">(</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">messages</span>: <span class="tok-kp">&amp;</span><span class="tok-nc">mut</span><span class="tok-w"> </span><span class="tok-n">Receiver</span><span class="tok-o">&lt;</span><span class="tok-nb">String</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">stream</span>: <span class="tok-nc">Arc</span><span class="tok-o">&lt;</span><span class="tok-n">TcpStream</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">shutdown</span>: <span class="tok-nc">Receiver</span><span class="tok-o">&lt;</span><span class="tok-n">Void</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"> </span><i class="conum" data-value="1"></i><b>(1)</b>
+<span class="tok-p">)</span><span class="tok-w"> </span>-&gt; <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-o">&amp;*</span><span class="tok-n">stream</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-k">loop</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"> </span><i class="conum" data-value="2"></i><b>(2)</b>
+<span class="tok-w">        </span><span class="tok-n">select</span><span class="tok-o">!</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">msg</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">messages</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">()</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">msg</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">msg</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-p">.</span><span class="tok-n">write_all</span><span class="tok-p">(</span><span class="tok-n">msg</span><span class="tok-p">.</span><span class="tok-n">as_bytes</span><span class="tok-p">()).</span><span class="tok-n">await</span><span class="tok-o">?</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">None</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">break</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">void</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">shutdown</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">()</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">void</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">void</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">void</span><span class="tok-w"> </span><span class="tok-p">{},</span><span class="tok-w"> </span><i class="conum" data-value="3"></i><b>(3)</b>
+<span class="tok-w">                </span><span class="tok-nb">None</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">break</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-nb">Ok</span><span class="tok-p">(())</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span></code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<table>
+<tr>
+<td><i class="conum" data-value="1"></i><b>1</b></td>
+<td>We add shutdown channel as an argument.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="2"></i><b>2</b></td>
+<td>Because of <code>select</code>, we can&#8217;t use a <code>white let</code> loop, so we desugar it further into a <code>loop</code>.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="3"></i><b>3</b></td>
+<td>In the shutdown case we use <code>match void {}</code> as a statically-checked <code>unreachable!()</code>.</td>
+</tr>
+</table>
+</div>
+<div class="paragraph">
+<p>Another problem is that between the moment we detect disconnection in <code>client_writer</code> and the moment when we actually remove the peer from the <code>peers</code> map, new messages might be pushed into the peer&#8217;s channel.
+To not lose these messages completely, we&#8217;ll return the messages channel back to broker.
+This also allows us to establish a useful invariant that the message channel strictly outlives the peer in the <code>peers</code> map, and make the broker itself infailable.</p>
+</div>
+<div class="paragraph">
+<p>The final code looks like this:</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="pygments highlight"><code data-lang="rust"><span></span><span class="tok-cp">#![feature(async_await)]</span><span class="tok-w"></span>
+
+<span class="tok-k">use</span><span class="tok-w"> </span><span class="tok-n">std</span>::<span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">net</span>::<span class="tok-n">ToSocketAddrs</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">sync</span>::<span class="tok-n">Arc</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">collections</span>::<span class="tok-n">hash_map</span>::<span class="tok-p">{</span><span class="tok-n">HashMap</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">Entry</span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-p">};</span><span class="tok-w"></span>
+
+<span class="tok-k">use</span><span class="tok-w"> </span><span class="tok-n">futures</span>::<span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">channel</span>::<span class="tok-n">mpsc</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">SinkExt</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">select</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-p">};</span><span class="tok-w"></span>
+
+<span class="tok-k">use</span><span class="tok-w"> </span><span class="tok-n">async_std</span>::<span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">io</span>::<span class="tok-n">BufReader</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">prelude</span>::<span class="tok-o">*</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">task</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">net</span>::<span class="tok-p">{</span><span class="tok-n">TcpListener</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">TcpStream</span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-p">};</span><span class="tok-w"></span>
+
+<span class="tok-k">type</span> <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-n">T</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">std</span>::<span class="tok-n">result</span>::<span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-n">T</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-nb">Box</span><span class="tok-o">&lt;</span><span class="tok-n">dyn</span><span class="tok-w"> </span><span class="tok-n">std</span>::<span class="tok-n">error</span>::<span class="tok-n">Error</span><span class="tok-w"> </span><span class="tok-o">+</span><span class="tok-w"> </span><span class="tok-nb">Send</span><span class="tok-w"> </span><span class="tok-o">+</span><span class="tok-w"> </span><span class="tok-nb">Sync</span><span class="tok-o">&gt;&gt;</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-k">type</span> <span class="tok-nc">Sender</span><span class="tok-o">&lt;</span><span class="tok-n">T</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">mpsc</span>::<span class="tok-n">UnboundedSender</span><span class="tok-o">&lt;</span><span class="tok-n">T</span><span class="tok-o">&gt;</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-k">type</span> <span class="tok-nc">Receiver</span><span class="tok-o">&lt;</span><span class="tok-n">T</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">mpsc</span>::<span class="tok-n">UnboundedReceiver</span><span class="tok-o">&lt;</span><span class="tok-n">T</span><span class="tok-o">&gt;</span><span class="tok-p">;</span><span class="tok-w"></span>
+
+<span class="tok-cp">#[derive(Debug)]</span><span class="tok-w"></span>
+<span class="tok-k">enum</span> <span class="tok-nc">Void</span><span class="tok-w"> </span><span class="tok-p">{}</span><span class="tok-w"></span>
+
+<span class="tok-k">fn</span> <span class="tok-nf">main</span><span class="tok-p">()</span><span class="tok-w"> </span>-&gt; <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">task</span>::<span class="tok-n">block_on</span><span class="tok-p">(</span><span class="tok-n">server</span><span class="tok-p">(</span><span class="tok-s">&quot;127.0.0.1:8080&quot;</span><span class="tok-p">))</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span>
+
+<span class="tok-n">async</span><span class="tok-w"> </span><span class="tok-k">fn</span> <span class="tok-nf">server</span><span class="tok-p">(</span><span class="tok-n">addr</span>: <span class="tok-nc">impl</span><span class="tok-w"> </span><span class="tok-n">ToSocketAddrs</span><span class="tok-p">)</span><span class="tok-w"> </span>-&gt; <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">listener</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">TcpListener</span>::<span class="tok-n">bind</span><span class="tok-p">(</span><span class="tok-n">addr</span><span class="tok-p">).</span><span class="tok-n">await</span><span class="tok-o">?</span><span class="tok-p">;</span><span class="tok-w"></span>
+
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-n">broker_sender</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">broker_receiver</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">mpsc</span>::<span class="tok-n">unbounded</span><span class="tok-p">();</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">broker</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">task</span>::<span class="tok-n">spawn</span><span class="tok-p">(</span><span class="tok-n">broker</span><span class="tok-p">(</span><span class="tok-n">broker_receiver</span><span class="tok-p">));</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">incoming</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">listener</span><span class="tok-p">.</span><span class="tok-n">incoming</span><span class="tok-p">();</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-k">while</span><span class="tok-w"> </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">stream</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">incoming</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">().</span><span class="tok-n">await</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-o">?</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">println</span><span class="tok-o">!</span><span class="tok-p">(</span><span class="tok-s">&quot;Accepting from: {}&quot;</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-p">.</span><span class="tok-n">peer_addr</span><span class="tok-p">()</span><span class="tok-o">?</span><span class="tok-p">);</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">spawn_and_log_error</span><span class="tok-p">(</span><span class="tok-n">client</span><span class="tok-p">(</span><span class="tok-n">broker_sender</span><span class="tok-p">.</span><span class="tok-n">clone</span><span class="tok-p">(),</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-p">));</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">drop</span><span class="tok-p">(</span><span class="tok-n">broker_sender</span><span class="tok-p">);</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">broker</span><span class="tok-p">.</span><span class="tok-n">await</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-nb">Ok</span><span class="tok-p">(())</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span>
+
+<span class="tok-n">async</span><span class="tok-w"> </span><span class="tok-k">fn</span> <span class="tok-nf">client</span><span class="tok-p">(</span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">broker</span>: <span class="tok-nc">Sender</span><span class="tok-o">&lt;</span><span class="tok-n">Event</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">stream</span>: <span class="tok-nc">TcpStream</span><span class="tok-p">)</span><span class="tok-w"> </span>-&gt; <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">Arc</span>::<span class="tok-n">new</span><span class="tok-p">(</span><span class="tok-n">stream</span><span class="tok-p">);</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">reader</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">BufReader</span>::<span class="tok-n">new</span><span class="tok-p">(</span><span class="tok-o">&amp;*</span><span class="tok-n">stream</span><span class="tok-p">);</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">lines</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">reader</span><span class="tok-p">.</span><span class="tok-n">lines</span><span class="tok-p">();</span><span class="tok-w"></span>
+
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">name</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">lines</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">().</span><span class="tok-n">await</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-nb">None</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-nb">Err</span><span class="tok-p">(</span><span class="tok-s">&quot;peer disconnected immediately&quot;</span><span class="tok-p">)</span><span class="tok-o">?</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">line</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-o">?</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">};</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-n">_shutdown_sender</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">shutdown_receiver</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">mpsc</span>::<span class="tok-n">unbounded</span>::<span class="tok-o">&lt;</span><span class="tok-n">Void</span><span class="tok-o">&gt;</span><span class="tok-p">();</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">broker</span><span class="tok-p">.</span><span class="tok-n">send</span><span class="tok-p">(</span><span class="tok-n">Event</span>::<span class="tok-n">NewPeer</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">name</span>: <span class="tok-nc">name</span><span class="tok-p">.</span><span class="tok-n">clone</span><span class="tok-p">(),</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">stream</span>: <span class="tok-nc">Arc</span>::<span class="tok-n">clone</span><span class="tok-p">(</span><span class="tok-o">&amp;</span><span class="tok-n">stream</span><span class="tok-p">),</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">shutdown</span>: <span class="tok-nc">shutdown_receiver</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">}).</span><span class="tok-n">await</span><span class="tok-p">.</span><span class="tok-n">unwrap</span><span class="tok-p">();</span><span class="tok-w"></span>
+
+<span class="tok-w">    </span><span class="tok-k">while</span><span class="tok-w"> </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">line</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">lines</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">().</span><span class="tok-n">await</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-o">?</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-n">dest</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">msg</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-p">.</span><span class="tok-n">find</span><span class="tok-p">(</span><span class="tok-sc">&#39;:&#39;</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-nb">None</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">continue</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">idx</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-o">&amp;</span><span class="tok-n">line</span><span class="tok-p">[..</span><span class="tok-n">idx</span><span class="tok-p">],</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-p">[</span><span class="tok-n">idx</span><span class="tok-w"> </span><span class="tok-o">+</span><span class="tok-w"> </span><span class="tok-mi">1</span><span class="tok-w"> </span><span class="tok-p">..].</span><span class="tok-n">trim</span><span class="tok-p">()),</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-p">};</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">dest</span>: <span class="tok-nb">Vec</span><span class="tok-o">&lt;</span><span class="tok-nb">String</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">dest</span><span class="tok-p">.</span><span class="tok-n">split</span><span class="tok-p">(</span><span class="tok-sc">&#39;,&#39;</span><span class="tok-p">).</span><span class="tok-n">map</span><span class="tok-p">(</span><span class="tok-o">|</span><span class="tok-n">name</span><span class="tok-o">|</span><span class="tok-w"> </span><span class="tok-n">name</span><span class="tok-p">.</span><span class="tok-n">trim</span><span class="tok-p">().</span><span class="tok-n">to_string</span><span class="tok-p">()).</span><span class="tok-n">collect</span><span class="tok-p">();</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">msg</span>: <span class="tok-nb">String</span> <span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">msg</span><span class="tok-p">.</span><span class="tok-n">trim</span><span class="tok-p">().</span><span class="tok-n">to_string</span><span class="tok-p">();</span><span class="tok-w"></span>
+
+<span class="tok-w">        </span><span class="tok-n">broker</span><span class="tok-p">.</span><span class="tok-n">send</span><span class="tok-p">(</span><span class="tok-n">Event</span>::<span class="tok-n">Message</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">from</span>: <span class="tok-nc">name</span><span class="tok-p">.</span><span class="tok-n">clone</span><span class="tok-p">(),</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">to</span>: <span class="tok-nc">dest</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">msg</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-p">}).</span><span class="tok-n">await</span><span class="tok-p">.</span><span class="tok-n">unwrap</span><span class="tok-p">();</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">}</span><span class="tok-w"></span>
+
+<span class="tok-w">    </span><span class="tok-nb">Ok</span><span class="tok-p">(())</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span>
+
+<span class="tok-n">async</span><span class="tok-w"> </span><span class="tok-k">fn</span> <span class="tok-nf">client_writer</span><span class="tok-p">(</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">messages</span>: <span class="tok-kp">&amp;</span><span class="tok-nc">mut</span><span class="tok-w"> </span><span class="tok-n">Receiver</span><span class="tok-o">&lt;</span><span class="tok-nb">String</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">stream</span>: <span class="tok-nc">Arc</span><span class="tok-o">&lt;</span><span class="tok-n">TcpStream</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">shutdown</span>: <span class="tok-nc">Receiver</span><span class="tok-o">&lt;</span><span class="tok-n">Void</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-p">)</span><span class="tok-w"> </span>-&gt; <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-o">&amp;*</span><span class="tok-n">stream</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-k">loop</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">select</span><span class="tok-o">!</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">msg</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">messages</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">()</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">msg</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">msg</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-p">.</span><span class="tok-n">write_all</span><span class="tok-p">(</span><span class="tok-n">msg</span><span class="tok-p">.</span><span class="tok-n">as_bytes</span><span class="tok-p">()).</span><span class="tok-n">await</span><span class="tok-o">?</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">None</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">break</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">void</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">shutdown</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">()</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">void</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">void</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">void</span><span class="tok-w"> </span><span class="tok-p">{},</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">None</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">break</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-nb">Ok</span><span class="tok-p">(())</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span>
+
+<span class="tok-cp">#[derive(Debug)]</span><span class="tok-w"></span>
+<span class="tok-k">enum</span> <span class="tok-nc">Event</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">NewPeer</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">name</span>: <span class="tok-nb">String</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">stream</span>: <span class="tok-nc">Arc</span><span class="tok-o">&lt;</span><span class="tok-n">TcpStream</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">shutdown</span>: <span class="tok-nc">Receiver</span><span class="tok-o">&lt;</span><span class="tok-n">Void</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">Message</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">from</span>: <span class="tok-nb">String</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">to</span>: <span class="tok-nb">Vec</span><span class="tok-o">&lt;</span><span class="tok-nb">String</span><span class="tok-o">&gt;</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">msg</span>: <span class="tok-nb">String</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span>
+
+<span class="tok-n">async</span><span class="tok-w"> </span><span class="tok-k">fn</span> <span class="tok-nf">broker</span><span class="tok-p">(</span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">events</span>: <span class="tok-nc">Receiver</span><span class="tok-o">&lt;</span><span class="tok-n">Event</span><span class="tok-o">&gt;</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-n">disconnect_sender</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">disconnect_receiver</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><i class="conum" data-value="1"></i><b>(1)</b>
+<span class="tok-w">        </span><span class="tok-n">mpsc</span>::<span class="tok-n">unbounded</span>::<span class="tok-o">&lt;</span><span class="tok-p">(</span><span class="tok-nb">String</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">Receiver</span><span class="tok-o">&lt;</span><span class="tok-nb">String</span><span class="tok-o">&gt;</span><span class="tok-p">)</span><span class="tok-o">&gt;</span><span class="tok-p">();</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">peers</span>: <span class="tok-nc">HashMap</span><span class="tok-o">&lt;</span><span class="tok-nb">String</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">Sender</span><span class="tok-o">&lt;</span><span class="tok-nb">String</span><span class="tok-o">&gt;&gt;</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">HashMap</span>::<span class="tok-n">new</span><span class="tok-p">();</span><span class="tok-w"></span>
+
+<span class="tok-w">    </span><span class="tok-k">loop</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">event</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">select</span><span class="tok-o">!</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">event</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">events</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">()</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">event</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">None</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">break</span><span class="tok-p">,</span><span class="tok-w"> </span><i class="conum" data-value="2"></i><b>(2)</b>
+<span class="tok-w">                </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">event</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-n">event</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">disconnect</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">disconnect_receiver</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">()</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-n">name</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">_pending_messages</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">disconnect</span><span class="tok-p">.</span><span class="tok-n">unwrap</span><span class="tok-p">();</span><span class="tok-w"> </span><i class="conum" data-value="3"></i><b>(3)</b>
+<span class="tok-w">                </span><span class="tok-n">assert</span><span class="tok-o">!</span><span class="tok-p">(</span><span class="tok-n">peers</span><span class="tok-p">.</span><span class="tok-n">remove</span><span class="tok-p">(</span><span class="tok-o">&amp;</span><span class="tok-n">name</span><span class="tok-p">).</span><span class="tok-n">is_some</span><span class="tok-p">());</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-k">continue</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-p">};</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">event</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">Event</span>::<span class="tok-n">Message</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"> </span><span class="tok-n">from</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">to</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">msg</span><span class="tok-w"> </span><span class="tok-p">}</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-k">for</span><span class="tok-w"> </span><span class="tok-n">addr</span><span class="tok-w"> </span><span class="tok-k">in</span><span class="tok-w"> </span><span class="tok-n">to</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                    </span><span class="tok-k">if</span><span class="tok-w"> </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">peer</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">peers</span><span class="tok-p">.</span><span class="tok-n">get_mut</span><span class="tok-p">(</span><span class="tok-o">&amp;</span><span class="tok-n">addr</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                        </span><span class="tok-n">peer</span><span class="tok-p">.</span><span class="tok-n">send</span><span class="tok-p">(</span><span class="tok-n">format</span><span class="tok-o">!</span><span class="tok-p">(</span><span class="tok-s">&quot;from {}: {}</span><span class="tok-se">\n</span><span class="tok-s">&quot;</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">from</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">msg</span><span class="tok-p">)).</span><span class="tok-n">await</span><span class="tok-w"></span>
+<span class="tok-w">                            </span><span class="tok-p">.</span><span class="tok-n">unwrap</span><span class="tok-p">()</span><span class="tok-w"> </span><i class="conum" data-value="6"></i><b>(6)</b>
+<span class="tok-w">                    </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">Event</span>::<span class="tok-n">NewPeer</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"> </span><span class="tok-n">name</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">shutdown</span><span class="tok-w"> </span><span class="tok-p">}</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">peers</span><span class="tok-p">.</span><span class="tok-n">entry</span><span class="tok-p">(</span><span class="tok-n">name</span><span class="tok-p">.</span><span class="tok-n">clone</span><span class="tok-p">())</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                    </span><span class="tok-n">Entry</span>::<span class="tok-n">Occupied</span><span class="tok-p">(..)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-p">(),</span><span class="tok-w"></span>
+<span class="tok-w">                    </span><span class="tok-n">Entry</span>::<span class="tok-n">Vacant</span><span class="tok-p">(</span><span class="tok-n">entry</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                        </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-n">client_sender</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">client_receiver</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">mpsc</span>::<span class="tok-n">unbounded</span><span class="tok-p">();</span><span class="tok-w"></span>
+<span class="tok-w">                        </span><span class="tok-n">entry</span><span class="tok-p">.</span><span class="tok-n">insert</span><span class="tok-p">(</span><span class="tok-n">client_sender</span><span class="tok-p">);</span><span class="tok-w"></span>
+<span class="tok-w">                        </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">disconnect_sender</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">disconnect_sender</span><span class="tok-p">.</span><span class="tok-n">clone</span><span class="tok-p">();</span><span class="tok-w"></span>
+<span class="tok-w">                        </span><span class="tok-n">spawn_and_log_error</span><span class="tok-p">(</span><span class="tok-n">async</span><span class="tok-w"> </span><span class="tok-k">move</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                            </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">res</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">client_writer</span><span class="tok-p">(</span><span class="tok-o">&amp;</span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">client_receiver</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">shutdown</span><span class="tok-p">).</span><span class="tok-n">await</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">                            </span><span class="tok-n">disconnect_sender</span><span class="tok-p">.</span><span class="tok-n">send</span><span class="tok-p">((</span><span class="tok-n">name</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">client_receiver</span><span class="tok-p">)).</span><span class="tok-n">await</span><span class="tok-w"> </span><i class="conum" data-value="4"></i><b>(4)</b>
+<span class="tok-w">                                </span><span class="tok-p">.</span><span class="tok-n">unwrap</span><span class="tok-p">();</span><span class="tok-w"></span>
+<span class="tok-w">                            </span><span class="tok-n">res</span><span class="tok-w"></span>
+<span class="tok-w">                        </span><span class="tok-p">});</span><span class="tok-w"></span>
+<span class="tok-w">                    </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">drop</span><span class="tok-p">(</span><span class="tok-n">peers</span><span class="tok-p">);</span><span class="tok-w"> </span><i class="conum" data-value="5"></i><b>(5)</b>
+<span class="tok-w">    </span><span class="tok-n">drop</span><span class="tok-p">(</span><span class="tok-n">disconnect_sender</span><span class="tok-p">);</span><span class="tok-w"> </span><i class="conum" data-value="6"></i><b>(6)</b>
+<span class="tok-w">    </span><span class="tok-k">while</span><span class="tok-w"> </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-nb">Some</span><span class="tok-p">((</span><span class="tok-n">_name</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">_pending_messages</span><span class="tok-p">))</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">disconnect_receiver</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">().</span><span class="tok-n">await</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span>
+
+<span class="tok-k">fn</span> <span class="tok-nf">spawn_and_log_error</span><span class="tok-o">&lt;</span><span class="tok-n">F</span><span class="tok-o">&gt;</span><span class="tok-p">(</span><span class="tok-n">fut</span>: <span class="tok-nc">F</span><span class="tok-p">)</span><span class="tok-w"> </span>-&gt; <span class="tok-nc">task</span>::<span class="tok-n">JoinHandle</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;</span><span class="tok-w"></span>
+<span class="tok-k">where</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">F</span>: <span class="tok-nc">Future</span><span class="tok-o">&lt;</span><span class="tok-n">Output</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;&gt;</span><span class="tok-w"> </span><span class="tok-o">+</span><span class="tok-w"> </span><span class="tok-nb">Send</span><span class="tok-w"> </span><span class="tok-o">+</span><span class="tok-w"> </span><span class="tok-nb">&#39;static</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">task</span>::<span class="tok-n">spawn</span><span class="tok-p">(</span><span class="tok-n">async</span><span class="tok-w"> </span><span class="tok-k">move</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-k">if</span><span class="tok-w"> </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-nb">Err</span><span class="tok-p">(</span><span class="tok-n">e</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">fut</span><span class="tok-p">.</span><span class="tok-n">await</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">eprintln</span><span class="tok-o">!</span><span class="tok-p">(</span><span class="tok-s">&quot;{}&quot;</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">e</span><span class="tok-p">)</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">})</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span></code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<table>
+<tr>
+<td><i class="conum" data-value="1"></i><b>1</b></td>
+<td>In the broker, we create a channel to reap disconnected peers and their undelivered messages.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="2"></i><b>2</b></td>
+<td>The broker&#8217;s main loop exits when the input events channel is exhausted (that is, when all readers exit).</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="3"></i><b>3</b></td>
+<td>Because broker itself holds a <code>disconnect_sender</code>, we know that the disconnections channel can&#8217;t be fully drained in the main loop.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="4"></i><b>4</b></td>
+<td>We send peer&#8217;s name and pending messages to the disconnections channel in both the happy and the not-so-happy path.
+Again, we can safely unwrap because broker outlives writers.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="5"></i><b>5</b></td>
+<td>We drop <code>peers</code> map to close writers' messages channel and shut down the writers for sure.
+It is not strictly necessary in the current setup, where the broker waits for readers' shutdown anyway.
+However, if we add a server-initiated shutdown (for example, kbd:[ctrl+c] handling), this will be a way for the broker to shutdown the writers.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="6"></i><b>6</b></td>
+<td>Finally, we close and drain the disconnections channel.</td>
+</tr>
+</table>
+</div>
+</div>
+</div>
 </div>
 <div id="footer">
 <div id="footer-text">

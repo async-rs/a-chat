@@ -1,9 +1,15 @@
 #![feature(async_await)]
 
-use std::{net::ToSocketAddrs, sync::Arc, collections::HashMap};
+use std::{
+    net::ToSocketAddrs,
+    sync::Arc,
+    collections::hash_map::{HashMap, Entry},
+};
 
-use futures::channel::mpsc;
-use futures::SinkExt;
+use futures::{
+    channel::mpsc,
+    SinkExt,
+};
 
 use async_std::{
     io::BufReader,
@@ -102,9 +108,14 @@ async fn broker(mut events: Receiver<Event>) -> Result<()> {
                 }
             }
             Event::NewPeer { name, stream} => {
-                let (client_sender, client_receiver) = mpsc::unbounded();
-                peers.insert(name.clone(), client_sender);
-                spawn_and_log_error(client_writer(client_receiver, stream));
+                match peers.entry(name) {
+                    Entry::Occupied(..) => (),
+                    Entry::Vacant(entry) => {
+                        let (client_sender, client_receiver) = mpsc::unbounded();
+                        entry.insert(client_sender);
+                        spawn_and_log_error(client_writer(client_receiver, stream));
+                    }
+                }
             }
         }
     }

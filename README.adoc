@@ -7,6 +7,8 @@
 
 In this tutorial, we will implement an asynchronous chat on top of async-std.
 
+https://htmlpreview.github.io/?https://raw.githubusercontent.com/async-std/a-chat/master/README.html?token=AANB3M5MMJ5DZVW74H2CX2K5LLLYS[HTML version]
+
 == Specification
 
 The chat uses a simple text protocol over TCP.
@@ -349,7 +351,7 @@ async fn broker(mut events: Receiver<Event>) -> Result<()> {
     Note how we don't need a `Mutex` here and can confidently say, at each iteration of the broker's loop, what is the current set of peers
 <3> To handle a message we send it over a channel to each destination
 <4> To handle new peer, we first register it in the peer's map ...
-<4> ... and then spawn a dedicated task to actually write the messages to the socket.
+<5> ... and then spawn a dedicated task to actually write the messages to the socket.
 
 == All Together
 
@@ -937,4 +939,4 @@ async fn try_main(addr: impl ToSocketAddrs) -> Result<()> {
 
 <1> Here we split `TcpStream` into read and write halfs: there's `impl AsyncRead for &'_ TcpStream`, just like the one in std.
 <2> We crate a steam of lines for both the socket and stdin.
-<3> In the main select loop, we print the lines we receive from server and send the lines we read from the console. 
+<3> In the main select loop, we print the lines we receive from server and send the lines we read from the console.

@@ -1560,6 +1560,104 @@ However, if we add a server-initiated shutdown (for example, kbd:[ctrl+c] handli
 </div>
 </div>
 </div>
+<div class="sect1">
+<h2 id="_implementing_a_client">Implementing a client</h2>
+<div class="sectionbody">
+<div class="paragraph">
+<p>Let&#8217;s now implement the client for the chat.
+Because the protocol is line-based, the implementation is pretty straightforward:</p>
+</div>
+<div class="ulist">
+<ul>
+<li>
+<p>Lines read from stdin should be send over the socket.</p>
+</li>
+<li>
+<p>Lines read from the socket should be echoed to stdout.</p>
+</li>
+</ul>
+</div>
+<div class="paragraph">
+<p>Unlike the server, the client needs only limited concurrency, as it interacts with only a single user.
+For this reason, async doesn&#8217;t bring a lot of performance benefits in this case.</p>
+</div>
+<div class="paragraph">
+<p>However, async is still useful for managing concurrency!
+Specifically, the client should <em>simultaneously</em> read from stdin and from the socket.
+Programming this with threads is cumbersome, especially when implementing clean shutdown.
+With async, we can just use the <code>select!</code> macro.</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="pygments highlight"><code data-lang="rust"><span></span><span class="tok-cp">#![feature(async_await)]</span><span class="tok-w"></span>
+
+<span class="tok-k">use</span><span class="tok-w"> </span><span class="tok-n">std</span>::<span class="tok-n">net</span>::<span class="tok-n">ToSocketAddrs</span><span class="tok-p">;</span><span class="tok-w"></span>
+
+<span class="tok-k">use</span><span class="tok-w"> </span><span class="tok-n">futures</span>::<span class="tok-n">select</span><span class="tok-p">;</span><span class="tok-w"></span>
+
+<span class="tok-k">use</span><span class="tok-w"> </span><span class="tok-n">async_std</span>::<span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">prelude</span>::<span class="tok-o">*</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">net</span>::<span class="tok-n">TcpStream</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">task</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">io</span>::<span class="tok-p">{</span><span class="tok-n">stdin</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">BufReader</span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-p">};</span><span class="tok-w"></span>
+
+<span class="tok-k">type</span> <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-n">T</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">std</span>::<span class="tok-n">result</span>::<span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-n">T</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-nb">Box</span><span class="tok-o">&lt;</span><span class="tok-n">dyn</span><span class="tok-w"> </span><span class="tok-n">std</span>::<span class="tok-n">error</span>::<span class="tok-n">Error</span><span class="tok-w"> </span><span class="tok-o">+</span><span class="tok-w"> </span><span class="tok-nb">Send</span><span class="tok-w"> </span><span class="tok-o">+</span><span class="tok-w"> </span><span class="tok-nb">Sync</span><span class="tok-o">&gt;&gt;</span><span class="tok-p">;</span><span class="tok-w"></span>
+
+
+<span class="tok-k">fn</span> <span class="tok-nf">main</span><span class="tok-p">()</span><span class="tok-w"> </span>-&gt; <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-n">task</span>::<span class="tok-n">block_on</span><span class="tok-p">(</span><span class="tok-n">try_main</span><span class="tok-p">(</span><span class="tok-s">&quot;127.0.0.1:8080&quot;</span><span class="tok-p">))</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span>
+
+<span class="tok-n">async</span><span class="tok-w"> </span><span class="tok-k">fn</span> <span class="tok-nf">try_main</span><span class="tok-p">(</span><span class="tok-n">addr</span>: <span class="tok-nc">impl</span><span class="tok-w"> </span><span class="tok-n">ToSocketAddrs</span><span class="tok-p">)</span><span class="tok-w"> </span>-&gt; <span class="tok-nb">Result</span><span class="tok-o">&lt;</span><span class="tok-p">()</span><span class="tok-o">&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">stream</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">TcpStream</span>::<span class="tok-n">connect</span><span class="tok-p">(</span><span class="tok-n">addr</span><span class="tok-p">).</span><span class="tok-n">await</span><span class="tok-o">?</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-n">reader</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">writer</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-p">(</span><span class="tok-o">&amp;</span><span class="tok-n">stream</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-o">&amp;</span><span class="tok-n">stream</span><span class="tok-p">);</span><span class="tok-w"> </span><i class="conum" data-value="1"></i><b>(1)</b>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">reader</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">BufReader</span>::<span class="tok-n">new</span><span class="tok-p">(</span><span class="tok-n">reader</span><span class="tok-p">);</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">lines_from_server</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">futures</span>::<span class="tok-n">StreamExt</span>::<span class="tok-n">fuse</span><span class="tok-p">(</span><span class="tok-n">reader</span><span class="tok-p">.</span><span class="tok-n">lines</span><span class="tok-p">());</span><span class="tok-w"> </span><i class="conum" data-value="2"></i><b>(2)</b>
+
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">stdin</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">BufReader</span>::<span class="tok-n">new</span><span class="tok-p">(</span><span class="tok-n">stdin</span><span class="tok-p">());</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-k">mut</span><span class="tok-w"> </span><span class="tok-n">lines_from_stdin</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">futures</span>::<span class="tok-n">StreamExt</span>::<span class="tok-n">fuse</span><span class="tok-p">(</span><span class="tok-n">stdin</span><span class="tok-p">.</span><span class="tok-n">lines</span><span class="tok-p">());</span><span class="tok-w"> </span><i class="conum" data-value="2"></i><b>(2)</b>
+<span class="tok-w">    </span><span class="tok-k">loop</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-n">select</span><span class="tok-o">!</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"> </span><i class="conum" data-value="3"></i><b>(3)</b>
+<span class="tok-w">            </span><span class="tok-n">line</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">lines_from_server</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">()</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">line</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-o">?</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">                    </span><span class="tok-n">println</span><span class="tok-o">!</span><span class="tok-p">(</span><span class="tok-s">&quot;{}&quot;</span><span class="tok-p">,</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-p">);</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">None</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">break</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">},</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-n">line</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">lines_from_stdin</span><span class="tok-p">.</span><span class="tok-n">next</span><span class="tok-p">()</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">match</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">Some</span><span class="tok-p">(</span><span class="tok-n">line</span><span class="tok-p">)</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-p">{</span><span class="tok-w"></span>
+<span class="tok-w">                    </span><span class="tok-kd">let</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-w"> </span><span class="tok-o">=</span><span class="tok-w"> </span><span class="tok-n">line</span><span class="tok-o">?</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">                    </span><span class="tok-n">writer</span><span class="tok-p">.</span><span class="tok-n">write_all</span><span class="tok-p">(</span><span class="tok-n">line</span><span class="tok-p">.</span><span class="tok-n">as_bytes</span><span class="tok-p">()).</span><span class="tok-n">await</span><span class="tok-o">?</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">                    </span><span class="tok-n">writer</span><span class="tok-p">.</span><span class="tok-n">write_all</span><span class="tok-p">(</span><span class="tok-s">b&quot;</span><span class="tok-se">\n</span><span class="tok-s">&quot;</span><span class="tok-p">).</span><span class="tok-n">await</span><span class="tok-o">?</span><span class="tok-p">;</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">                </span><span class="tok-nb">None</span><span class="tok-w"> </span><span class="tok-o">=&gt;</span><span class="tok-w"> </span><span class="tok-k">break</span><span class="tok-p">,</span><span class="tok-w"></span>
+<span class="tok-w">            </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">        </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-p">}</span><span class="tok-w"></span>
+<span class="tok-w">    </span><span class="tok-nb">Ok</span><span class="tok-p">(())</span><span class="tok-w"></span>
+<span class="tok-p">}</span><span class="tok-w"></span></code></pre>
+</div>
+</div>
+<div class="colist arabic">
+<table>
+<tr>
+<td><i class="conum" data-value="1"></i><b>1</b></td>
+<td>Here we split <code>TcpStream</code> into read and write halfs: there&#8217;s <code>impl AsyncRead for &amp;'_ TcpStream</code>, just like the one in std.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="2"></i><b>2</b></td>
+<td>We crate a steam of lines for both the socket and stdin.</td>
+</tr>
+<tr>
+<td><i class="conum" data-value="3"></i><b>3</b></td>
+<td>In the main select loop, we print the lines we receive from server and send the lines we read from the console.</td>
+</tr>
+</table>
+</div>
+</div>
+</div>
 </div>
 <div id="footer">
 <div id="footer-text">

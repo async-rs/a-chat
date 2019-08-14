@@ -585,7 +585,7 @@ Notice what happens with all of the channels once we exit the accept loop:
 Currently, we only ever _add_ new peers to the map.
 This is clearly wrong: if a peer closes connection to the chat, we should not try to send any more messages to it.
 
-One subtlety with handing disconnection is that we can detect it either in the reader's task, or in the writer's task.
+One subtlety with handling disconnection is that we can detect it either in the reader's task, or in the writer's task.
 The most obvious solution here is to just remove the peer from the `peers` map in both cases, but this would be wrong.
 If _both_ read and write fail, we'll remove the peer twice, but it can be the case that the peer reconnected between the two failures!
 To fix this, we will only remove the peer when the write side finishes.

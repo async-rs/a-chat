@@ -1229,7 +1229,7 @@ This drops writer&#8217;s senders.</td>
 This is clearly wrong: if a peer closes connection to the chat, we should not try to send any more messages to it.</p>
 </div>
 <div class="paragraph">
-<p>One subtlety with handing disconnection is that we can detect it either in the reader&#8217;s task, or in the writer&#8217;s task.
+<p>One subtlety with handling disconnection is that we can detect it either in the reader&#8217;s task, or in the writer&#8217;s task.
 The most obvious solution here is to just remove the peer from the <code>peers</code> map in both cases, but this would be wrong.
 If <em>both</em> read and write fail, we&#8217;ll remove the peer twice, but it can be the case that the peer reconnected between the two failures!
 To fix this, we will only remove the peer when the write side finishes.

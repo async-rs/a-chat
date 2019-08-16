@@ -8,4 +8,4 @@ edition = "2018"
 
 [dependencies]
 futures-preview = { version = "0.3.0-alpha.17", features = [ "async-await", "nightly" ] }
-async-std = { path = "../async-std" }
+async-std = "0.99"

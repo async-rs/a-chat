@@ -3,6 +3,7 @@
 use std::net::ToSocketAddrs;
 
 use futures::select;
+use futures::FutureExt;
 
 use async_std::{
     prelude::*,
@@ -28,14 +29,14 @@ async fn try_main(addr: impl ToSocketAddrs) -> Result<()> {
     let mut lines_from_stdin = futures::StreamExt::fuse(stdin.lines());
     loop {
         select! {
-            line = lines_from_server.next() => match line {
+            line = lines_from_server.next().fuse() => match line {
                 Some(line) => {
                     let line = line?;
                     println!("{}", line);
                 },
                 None => break,
             },
-            line = lines_from_stdin.next() => match line {
+            line = lines_from_stdin.next().fuse() => match line {
                 Some(line) => {
                     let line = line?;
                     writer.write_all(line.as_bytes()).await?;

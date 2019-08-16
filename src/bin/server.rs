@@ -9,6 +9,7 @@ use std::{
 use futures::{
     channel::mpsc,
     SinkExt,
+    FutureExt,
     select,
 };
 
@@ -89,11 +90,11 @@ async fn client_writer(
     let mut stream = &*stream;
     loop {
         select! {
-            msg = messages.next() => match msg {
+            msg = messages.next().fuse() => match msg {
                 Some(msg) => stream.write_all(msg.as_bytes()).await?,
                 None => break,
             },
-            void = shutdown.next() => match void {
+            void = shutdown.next().fuse() => match void {
                 Some(void) => match void {},
                 None => break,
             }
@@ -123,11 +124,11 @@ async fn broker(mut events: Receiver<Event>) {
 
     loop {
         let event = select! {
-            event = events.next() => match event {
+            event = events.next().fuse() => match event {
                 None => break,
                 Some(event) => event,
             },
-            disconnect = disconnect_receiver.next() => {
+            disconnect = disconnect_receiver.next().fuse() => {
                 let (name, _pending_messages) = disconnect.unwrap();
                 assert!(peers.remove(&name).is_some());
                 continue;

@@ -666,7 +666,7 @@ async fn client_writer(
 ----
 
 <1> We add shutdown channel as an argument.
-<2> Because of `select`, we can't use a `white let` loop, so we desugar it further into a `loop`.
+<2> Because of `select`, we can't use a `while let` loop, so we desugar it further into a `loop`.
 <3> In the shutdown case we use `match void {}` as a statically-checked `unreachable!()`.
 
 

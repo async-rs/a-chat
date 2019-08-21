@@ -1,5 +1,3 @@
-#![feature(async_await)]
-
 use std::net::ToSocketAddrs;
 
 use futures::select;

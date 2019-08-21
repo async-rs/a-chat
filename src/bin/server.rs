@@ -1,5 +1,3 @@
-#![feature(async_await)]
-
 use std::{
     net::ToSocketAddrs,
     sync::Arc,

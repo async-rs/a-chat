@@ -65,10 +65,11 @@ $ cd a-chat
 
 Then add the following to your `Cargo.toml`:
 
-```toml
+[source]
+----
 futures-preview = { version = "0.3.0-alpha.18", features = [ "async-await", "nightly" ] }
 async-std = "0.99"
-````
+----
 
 At the moment `async-std` requires nightly, so let's add a rustup override for convenience:
 

@@ -942,5 +942,5 @@ async fn try_main(addr: impl ToSocketAddrs) -> Result<()> {
 ----
 
 <1> Here we split `TcpStream` into read and write halfs: there's `impl AsyncRead for &'_ TcpStream`, just like the one in std.
-<2> We crate a steam of lines for both the socket and stdin.
+<2> We crate a stream of lines for both the socket and stdin.
 <3> In the main select loop, we print the lines we receive from server and send the lines we read from the console.

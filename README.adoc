@@ -63,6 +63,13 @@ $ cargo new a-chat
 $ cd a-chat
 ----
 
+Then add the following to your `Cargo.toml`:
+
+```toml
+futures-preview = { version = "0.3.0-alpha.18", features = [ "async-await", "nightly" ] }
+async-std = "0.99"
+````
+
 At the moment `async-std` requires nightly, so let's add a rustup override for convenience:
 
 [source]
@@ -81,8 +88,6 @@ First of all, let's add required import boilerplate:
 
 [source,rust]
 ----
-#![feature(async_await)]
-
 use std::net::ToSocketAddrs; <1>
 
 use async_std::{
@@ -359,8 +364,6 @@ At this point, we only need to start broker to get a fully-functioning (in the h
 
 [source,rust]
 ----
-#![feature(async_await)]
-
 use std::{
     net::ToSocketAddrs,
     sync::Arc,
@@ -678,7 +681,7 @@ The final code looks like this:
 
 [source,rust]
 ----
-#![feature(async_await)]
+
 
 use std::{
     net::ToSocketAddrs,
@@ -886,7 +889,7 @@ With async, we can just use the `select!` macro.
 
 [source,rust]
 ----
-#![feature(async_await)]
+
 
 use std::net::ToSocketAddrs;
 

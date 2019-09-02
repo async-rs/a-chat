@@ -1,7 +1,5 @@
 = a-chat tutorial
 :icons: font
-:source-highlighter: pygments
-:pygments-style: borland
 
 :source-language: rust
 

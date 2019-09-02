@@ -80,7 +80,7 @@ async fn connection_loop(mut broker: Sender<Event>, stream: TcpStream) -> Result
     Ok(())
 }
 
-async fn client_writer_loop(
+async fn connection_writer_loop(
     messages: &mut Receiver<String>,
     stream: Arc<TcpStream>,
     mut shutdown: Receiver<Void>,
@@ -149,7 +149,7 @@ async fn broker_loop(mut events: Receiver<Event>) {
                         entry.insert(client_sender);
                         let mut disconnect_sender = disconnect_sender.clone();
                         spawn_and_log_error(async move {
-                            let res = client_writer_loop(&mut client_receiver, stream, shutdown).await;
+                            let res = connection_writer_loop(&mut client_receiver, stream, shutdown).await;
                             disconnect_sender.send((name, client_receiver)).await
                                 .unwrap();
                             res

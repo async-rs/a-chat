@@ -26,26 +26,26 @@ type Receiver<T> = mpsc::UnboundedReceiver<T>;
 enum Void {}
 
 fn main() -> Result<()> {
-    task::block_on(server("127.0.0.1:8080"))
+    task::block_on(accept_loop("127.0.0.1:8080"))
 }
 
-async fn server(addr: impl ToSocketAddrs) -> Result<()> {
+async fn accept_loop(addr: impl ToSocketAddrs) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
     let (broker_sender, broker_receiver) = mpsc::unbounded();
-    let broker = task::spawn(broker(broker_receiver));
+    let broker = task::spawn(broker_loop(broker_receiver));
     let mut incoming = listener.incoming();
     while let Some(stream) = incoming.next().await {
         let stream = stream?;
         println!("Accepting from: {}", stream.peer_addr()?);
-        spawn_and_log_error(client(broker_sender.clone(), stream));
+        spawn_and_log_error(connection_loop(broker_sender.clone(), stream));
     }
     drop(broker_sender);
     broker.await;
     Ok(())
 }
 
-async fn client(mut broker: Sender<Event>, stream: TcpStream) -> Result<()> {
+async fn connection_loop(mut broker: Sender<Event>, stream: TcpStream) -> Result<()> {
     let stream = Arc::new(stream);
     let reader = BufReader::new(&*stream);
     let mut lines = reader.lines();
@@ -80,7 +80,7 @@ async fn client(mut broker: Sender<Event>, stream: TcpStream) -> Result<()> {
     Ok(())
 }
 
-async fn client_writer(
+async fn client_writer_loop(
     messages: &mut Receiver<String>,
     stream: Arc<TcpStream>,
     mut shutdown: Receiver<Void>,
@@ -115,7 +115,7 @@ enum Event {
     },
 }
 
-async fn broker(mut events: Receiver<Event>) {
+async fn broker_loop(mut events: Receiver<Event>) {
     let (disconnect_sender, mut disconnect_receiver) =
         mpsc::unbounded::<(String, Receiver<String>)>();
     let mut peers: HashMap<String, Sender<String>> = HashMap::new();
@@ -149,7 +149,7 @@ async fn broker(mut events: Receiver<Event>) {
                         entry.insert(client_sender);
                         let mut disconnect_sender = disconnect_sender.clone();
                         spawn_and_log_error(async move {
-                            let res = client_writer(&mut client_receiver, stream, shutdown).await;
+                            let res = client_writer_loop(&mut client_receiver, stream, shutdown).await;
                             disconnect_sender.send((name, client_receiver)).await
                                 .unwrap();
                             res
